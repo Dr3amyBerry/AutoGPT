@@ -117,18 +117,18 @@ Choose a node and workspace explicitly for each operation. A run_shell result is
 ## Async shell jobs and long-lived connections
 
 **Default: do not hold an MCP call open while a command is executing.**
-\`run_shell(node_id="vps-01", workspace="demo", command="pytest -q", timeout=3600, wait_seconds=0)\`
-responds after dispatch with a durable task ID. The job keeps running on the client independently of that MCP request. You may read or edit other files and query its status later with \`get_task(task_id)\`.
+`run_shell(node_id="vps-01", workspace="demo", command="pytest -q", timeout=3600, wait_seconds=0)`
+responds after dispatch with a durable task ID. The job keeps running on the client independently of that MCP request. You may read or edit other files and query its status later with `get_task(task_id)`.
 
-For quick commands, set \`wait_seconds=2\` (or up to 20 seconds). If the command finishes in that short window, the result is included immediately; otherwise the response contains the task ID and current state. \`wait_for_task(task_id,wait_seconds=5)\` offers the same choice later without launching another command.
+For quick commands, set `wait_seconds=2` (or up to 20 seconds). If the command finishes in that short window, the result is included immediately; otherwise the response contains the task ID and current state. `wait_for_task(task_id,wait_seconds=5)` offers the same choice later without launching another command.
 
-Queue independent commands with \`run_shell_batch(node_id,workspace,commands=["pytest -q","git status","npm run build"])\`. This returns their task IDs without serial waits. Each command still requires separate permission on the device when in **Approve** mode; **Full Auto** is a local selection and requires no per-command approval.
+Queue independent commands with `run_shell_batch(node_id,workspace,commands=["pytest -q","git status","npm run build"])`. This returns their task IDs without serial waits. Each command still requires separate permission on the device when in **Approve** mode; **Full Auto** is a local selection and requires no per-command approval.
 
-Retrieve the latest commands with \`list_tasks(node_id="vps-01", workspace="demo", limit=30)\`. For previously known IDs, \`get_tasks(task_ids=[...])\` provides their statuses/results in a single MCP call. During execution, call \`get_task_logs(task_id, after_seq=0)\` and reuse its \`next_seq\` to retrieve only new output. Incremental logs are retained in SQLite up to 2 MB per job, after which \`logs_truncated\` is set. The final command summary independently retains up to 100 KB each of stdout/stderr.
+Retrieve the latest commands with `list_tasks(node_id="vps-01", workspace="demo", limit=30)`. For previously known IDs, `get_tasks(task_ids=[...])` provides their statuses/results in a single MCP call. During execution, call `get_task_logs(task_id, after_seq=0)` and reuse its `next_seq` to retrieve only new output. Incremental logs are retained in SQLite up to 2 MB per job, after which `logs_truncated` is set. The final command summary independently retains up to 100 KB each of stdout/stderr.
 
 The client WebSocket is designed to remain connected continuously, and uses periodic ping/pong frames; it is not a one-hour per-job TCP connection. **Shell commands can run for up to 3600 seconds (1 hour)** regardless of whether ChatGPT's individual tool request remains active. The server itself does not impose a hard global concurrency cap on shell jobs, but the operating system, network, SQLite storage and ChatGPT provider may impose their own limits.
 
-**Important:** if the client disconnects, currently executing subprocesses are cancelled; on control-plane restart, unfinished jobs are marked \`interrupted\`, not automatically replayed. This version does not yet resume running jobs across process restarts or offer guaranteed 24/7 uptime. MCP sessions can expire according to platform rules; no fixed one-hour ChatGPT connector guarantee is claimed.
+**Important:** if the client disconnects, currently executing subprocesses are cancelled; on control-plane restart, unfinished jobs are marked `interrupted`, not automatically replayed. This version does not yet resume running jobs across process restarts or offer guaranteed 24/7 uptime. MCP sessions can expire according to platform rules; no fixed one-hour ChatGPT connector guarantee is claimed.
 
 ## Safety boundaries
 
