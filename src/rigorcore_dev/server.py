@@ -108,9 +108,11 @@ async def get_task(task_id: str) -> dict:
     return task
 
 @mcp.tool()
-async def get_tasks(task_ids: list[str]) -> list[dict]:
-    """Get up to 100 recent task statuses and results in one MCP request."""
-    return hub.store.get_many(task_ids)
+async def get_tasks(task_ids: list[str], include_results: bool = False) -> list[dict]:
+    """Get many statuses in one call, compact by default to save model context.
+    Set include_results=True to include complete output (may be very large).
+    """
+    return hub.store.get_many(task_ids, include_results=include_results)
 
 @mcp.tool()
 async def list_tasks(node_id: str = "", workspace: str = "", status: str = "",
