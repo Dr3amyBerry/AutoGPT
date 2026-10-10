@@ -101,7 +101,7 @@ class Agent:
                     bounded_read(process.stderr, "stderr"),
                 ), timeout=timeout
             )
-        except (asyncio.TimeoutError, asyncio.CancelledError) as error:
+        except BaseException as error:
             if process.returncode is None:
                 if os.name != "nt":
                     try:
