@@ -23,7 +23,7 @@ File operations: list_files, read_file, search_text, write_files. Shell operatio
 
 The MCP server is not a long-running shell transport: `run_shell` dispatches a job, records it in SQLite and immediately returns a task ID. A caller can request `wait_seconds` from 0 to 20 seconds for trivial operations. Shell execution continues on the active node after that MCP request ends, up to 3600 seconds per command.
 
-`run_shell_batch` dispatches multiple jobs concurrently, without a global fixed job-cap in the broker. `list_tasks` lists recent commands, `get_tasks` fetches multiple known IDs in one call, and `get_task_logs(after_seq=...)` incrementally reads stdout/stderr from SQLite. Polling does not depend on holding open the original MCP session.
+`run_shell_batch` dispatches multiple jobs concurrently, without a global fixed job-cap in the broker. `list_tasks` lists recent commands with bounded previews, `get_tasks` fetches compact summaries of multiple known IDs in one call (or full results when requested), and `get_task_logs(after_seq=...)` incrementally reads stdout/stderr from SQLite. Polling does not depend on holding open the original MCP session.
 
 A client WebSocket is a separate long-lived outgoing connection, with periodic ping/pong keepalives. ChatGPT/tool lifetime remains subject to provider and reverse-proxy limits; an exact 60-minute ChatGPT MCP session cannot be guaranteed by this repository. A client disconnect cancels its currently running process trees as supported by the platform. Server restart interrupts in-flight jobs and keeps past task history, without retrying potentially destructive shell commands. Persistence across server restart does NOT mean the shell job resumes.
 
