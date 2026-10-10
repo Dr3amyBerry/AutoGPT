@@ -76,8 +76,28 @@ class Agent:
             *argv, cwd=str(workspace.root), env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **options
         )
+        async def bounded_read(stream):
+            # Drain pipes fully without allowing unbounded memory growth.
+            output = bytearray()
+            truncated = False
+            while True:
+                block = await stream.read(65536)
+                if not block:
+                    break
+                room = max(0, 100_000 - len(output))
+                if len(block) > room:
+                    truncated = True
+                output.extend(block[:room])
+            return bytes(output), truncated
+
         try:
-            out, err = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            _, (out, out_cut), (err, err_cut) = await asyncio.wait_for(
+                asyncio.gather(
+                    process.wait(),
+                    bounded_read(process.stdout),
+                    bounded_read(process.stderr),
+                ), timeout=timeout
+            )
         except (asyncio.TimeoutError, asyncio.CancelledError) as error:
             if process.returncode is None:
                 if os.name != "nt":
@@ -92,9 +112,9 @@ class Agent:
                 raise ValueError("command timed out") from error
             raise
         return {"exit_code": process.returncode,
-                "stdout": out[:100_000].decode("utf-8", errors="replace"),
-                "stderr": err[:100_000].decode("utf-8", errors="replace"),
-                "truncated": len(out) > 100_000 or len(err) > 100_000}
+                "stdout": out.decode("utf-8", errors="replace"),
+                "stderr": err.decode("utf-8", errors="replace"),
+                "truncated": out_cut or err_cut}
 
     async def execute(self, msg: dict):
         rid, op = msg["id"], msg["op"]
