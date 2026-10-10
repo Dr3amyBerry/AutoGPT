@@ -18,6 +18,19 @@ Server -> Agent: ready(node_id), request(id,workspace,op,args), cancel(id).
 
 File operations: list_files, read_file, search_text, write_files. Shell operations return a task ID; get_task polls persisted status.
 
+
+## Async commands and short MCP calls
+
+The MCP server is not a long-running shell transport: \`run_shell\` dispatches a job, records it in SQLite and immediately returns a task ID. A caller can request \`wait_seconds\` from 0 to 20 seconds for trivial operations. Shell execution continues on the active node after that MCP request ends, up to 3600 seconds per command.
+
+\`run_shell_batch\` dispatches multiple jobs concurrently, without a global fixed job-cap in the broker. \`list_tasks\` lists recent commands, \`get_tasks\` fetches multiple known IDs in one call, and \`get_task_logs(after_seq=...)\` incrementally reads stdout/stderr from SQLite. Polling does not depend on holding open the original MCP session.
+
+A client WebSocket is a separate long-lived outgoing connection, with periodic ping/pong keepalives. ChatGPT/tool lifetime remains subject to provider and reverse-proxy limits; an exact 60-minute ChatGPT MCP session cannot be guaranteed by this repository. A client disconnect cancels its currently running process trees as supported by the platform. Server restart interrupts in-flight jobs and keeps past task history, without retrying potentially destructive shell commands. Persistence across server restart does NOT mean the shell job resumes.
+
+Approval is local: direct source edits do not require shell approval; every command in Approve mode waits for explicit local authorization. In Full Auto, the host executes commands with its OS user privileges. Concurrent jobs can still contend over a filesystem or Git repository, so callers should not launch conflicting writes to the same worktree in parallel.
+
+Task logs persist up to 2 MB per job with a truncation flag to bound storage growth; the final result retains up to 100 KB each of stdout/stderr. Such per-result quotas are independent of process concurrency.
+
 ## Trust and security
 
 - Use two different, randomly generated bearer tokens: one MCP token and one agent token.
