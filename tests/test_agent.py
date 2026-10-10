@@ -43,3 +43,22 @@ def test_denial(tmp_path):
         with pytest.raises(PermissionError):
             await task
     asyncio.run(scenario())
+
+
+def test_shell_streams_logs_without_waiting_for_full_output(tmp_path):
+    async def scenario():
+        agent = build(tmp_path, mode="auto")
+        events = []
+        async def capture(payload):
+            events.append(payload)
+        agent.send = capture
+        result = await agent.shell("logging", agent.spaces["repo"], {
+            "command": "echo RIGORCORE_STREAM_V2", "timeout": 3600,
+        })
+        assert result["exit_code"] == 0
+        assert "RIGORCORE_STREAM_V2" in result["stdout"]
+        assert any(entry.get("type") == "status" and entry.get("status") == "running"
+                   for entry in events)
+        assert any(entry.get("type") == "log" and "RIGORCORE_STREAM_V2" in entry.get("text", "")
+                   for entry in events)
+    asyncio.run(scenario())
