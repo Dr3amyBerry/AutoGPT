@@ -40,6 +40,7 @@ Set the environment variables in the service manager or your shell:
 
     export RIGORCORE_MCP_TOKEN='YOUR_MCP_SECRET'
     export RIGORCORE_AGENT_TOKEN='YOUR_DIFFERENT_AGENT_SECRET'
+    export RIGORCORE_PUBLIC_HOST='dev.example.com'
     rigorcore-dev serve --host 127.0.0.1 --port 8765
 
 The server listens on loopback by default. Add a real domain, firewall and HTTPS reverse proxy. For example, with Caddy:
