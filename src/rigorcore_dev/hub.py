@@ -2,13 +2,12 @@
 from __future__ import annotations
 import asyncio
 import hmac
-import json
 import time
 import uuid
 from dataclasses import dataclass
 from fastapi import WebSocket
 from .config import SAFE_ID
-from .storage import TaskStore
+from .storage import TaskStore, TERMINAL
 
 @dataclass
 class Node:
@@ -24,7 +23,7 @@ class Hub:
         self.agent_token = agent_token
         self.store = store
         self.nodes: dict[str, Node] = {}
-        self.waiting: dict[str, asyncio.Future] = {}
+        self.waiting: dict[str, tuple[str, asyncio.Future]] = {}
 
     def snapshot(self) -> list[dict]:
         return [{"node_id": n.id, "name": n.name, "workspaces": n.workspaces,
@@ -39,20 +38,35 @@ class Hub:
             raise ValueError("workspace unavailable on this node")
         return node
 
-    async def request(self, node_id: str, workspace: str, op: str, args: dict, wait: bool = True):
+    async def await_task(self, task_id: str, seconds: float = 0):
+        # A short wait, never the entire shell lifetime. ChatGPT polls later.
+        seconds = min(max(float(seconds), 0.0), 20.0)
+        deadline = asyncio.get_running_loop().time() + seconds
+        task = self.store.get(task_id)
+        while task and task["status"] not in TERMINAL and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(min(0.1, max(0.0, deadline - asyncio.get_running_loop().time())))
+            task = self.store.get(task_id)
+        return task
+
+    async def request(self, node_id: str, workspace: str, op: str, args: dict,
+                      wait_seconds: float = 0):
         node = self.choose(node_id, workspace)
         request_id = uuid.uuid4().hex
         message = {"type": "request", "id": request_id, "workspace": workspace,
                    "op": op, "args": args}
         if op == "shell":
-            self.store.create(request_id, node_id, workspace, op)
-            await node.websocket.send_json(message)
-            return {"task_id": request_id, "status": "queued",
-                    "hint": "Use get_task to poll status; approval may be needed on the device"}
-        if not wait:
-            raise ValueError("unsupported asynchronous operation")
+            self.store.create(request_id, node_id, workspace, op, args.get("command", ""))
+            try:
+                await node.websocket.send_json(message)
+            except Exception as exc:
+                self.store.update(request_id, "failed", error="could not dispatch command")
+                raise ConnectionError("could not send job to agent") from exc
+            result = await self.await_task(request_id, wait_seconds)
+            return {**result, "hint": ("Command finished" if result["status"] in TERMINAL else
+                "Command is running or awaiting local approval. Continue other work; "
+                "use get_task, list_tasks or get_task_logs later.")}
         future = asyncio.get_running_loop().create_future()
-        self.waiting[request_id] = future
+        self.waiting[request_id] = (node_id, future)
         try:
             await node.websocket.send_json(message)
             return await asyncio.wait_for(future, timeout=45)
@@ -63,7 +77,7 @@ class Hub:
         task = self.store.get(task_id)
         if not task:
             raise ValueError("task not found")
-        if task["status"] in {"completed", "failed", "denied", "cancelled", "interrupted"}:
+        if task["status"] in TERMINAL:
             return task
         node = self.nodes.get(task["node"])
         if node:
@@ -106,14 +120,18 @@ class Hub:
                 msg = await ws.receive_json()
                 kind = msg.get("type")
                 request_id = msg.get("id")
+                if not isinstance(request_id, str):
+                    if kind == "mode" and msg.get("mode") in {"approve", "auto"}:
+                        node.mode = msg["mode"]
+                    continue
                 if kind == "reply":
-                    future = self.waiting.get(request_id)
-                    if future and not future.done():
+                    pending = self.waiting.get(request_id)
+                    if pending and pending[0] == node_id and not pending[1].done():
                         if msg.get("ok"):
-                            future.set_result(msg.get("result"))
+                            pending[1].set_result(msg.get("result"))
                         else:
-                            future.set_exception(ValueError(str(msg.get("error", "remote error"))[:1000]))
-                    task = self.store.get(request_id) if isinstance(request_id, str) else None
+                            pending[1].set_exception(ValueError(str(msg.get("error", "remote error"))[:1000]))
+                    task = self.store.get(request_id)
                     if task and task["node"] == node_id:
                         result = msg.get("result")
                         if msg.get("ok"):
@@ -126,19 +144,21 @@ class Hub:
                             status = "failed"
                         self.store.update(request_id, status, result=result, error=msg.get("error"))
                 elif kind == "status":
-                    task = self.store.get(request_id) if isinstance(request_id, str) else None
+                    task = self.store.get(request_id)
                     if task and task["node"] == node_id:
                         self.store.update(request_id, msg.get("status", "running"))
-                elif kind == "mode":
-                    if msg.get("mode") in {"approve", "auto"}:
-                        node.mode = msg["mode"]
+                elif kind == "log":
+                    task = self.store.get(request_id)
+                    chunk = msg.get("text")
+                    if task and task["node"] == node_id and isinstance(chunk, str) and len(chunk) <= 16384:
+                        self.store.append_log(request_id, msg.get("stream"), chunk)
         except Exception:
-            # Disconnect is expected here; never leak agent keys into logs.
+            # Disconnect or invalid client data: don't leak credentials in exceptions.
             pass
         finally:
             if node is not None and self.nodes.get(node.id) is node:
                 self.nodes.pop(node.id, None)
                 self.store.interrupt_node(node.id)
-                for request_id, future in list(self.waiting.items()):
-                    if not future.done():
+                for request_id, (owner, future) in list(self.waiting.items()):
+                    if owner == node.id and not future.done():
                         future.set_exception(ConnectionError("agent disconnected"))
