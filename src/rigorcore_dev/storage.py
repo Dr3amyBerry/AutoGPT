@@ -81,6 +81,9 @@ class TaskStore:
     @staticmethod
     def compact(entry: dict) -> dict:
         """Keep list/batch MCP responses small; get_task remains the detailed endpoint."""
+        command = entry.get("command") or ""
+        entry["command_truncated"] = len(command) > 400
+        entry["command"] = command[:400]
         result = entry.get("result")
         if isinstance(result, dict):
             entry["result"] = {
