@@ -120,3 +120,21 @@ def test_log_quota_is_bounded(tmp_path):
     store.append_log("job", "stdout", "abcdefgh", max_log_bytes=5)
     assert store.get("job")["logs_truncated"] == 1
     assert store.logs("job")["logs"][0]["text"] == "abcde"
+
+
+def test_fifty_concurrent_queued_commands_have_distinct_ids(tmp_path):
+    async def scenario():
+        store = TaskStore(tmp_path / "jobs.db")
+        hub = Hub("agent-secret", store)
+        socket = MemorySocket()
+        hub.nodes["heavy"] = Node("heavy", "Heavy VPS", ["project"], "auto", socket, time.time())
+        jobs = await asyncio.gather(*(
+            hub.request("heavy", "project", "shell",
+                        {"command": "echo " + str(i), "timeout": 3600})
+            for i in range(50)
+        ))
+        assert len(jobs) == len({item["task_id"] for item in jobs}) == 50
+        assert len(socket.sent) == 50
+        assert len(store.list(node="heavy", limit=100)) == 50
+        assert len(store.get_many([item["task_id"] for item in jobs])) == 50
+    asyncio.run(scenario())
