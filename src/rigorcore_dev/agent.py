@@ -52,7 +52,8 @@ class Agent:
         command = args.get("command")
         if not isinstance(command, str) or not command or len(command) > 10_000:
             raise ValueError("invalid command")
-        timeout = min(600, max(1, int(args.get("timeout", 120))))
+        # Each job may execute for up to an hour, regardless of MCP request duration.
+        timeout = min(3600, max(1, int(args.get("timeout", 3600))))
         if self.mode == "approve":
             loop = asyncio.get_running_loop()
             decision = loop.create_future()
@@ -76,26 +77,28 @@ class Agent:
             *argv, cwd=str(workspace.root), env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **options
         )
-        async def bounded_read(stream):
-            # Drain pipes fully without allowing unbounded memory growth.
+        async def bounded_read(stream, stream_name):
+            # Stream fresh output to the hub and retain only a bounded final summary.
             output = bytearray()
             truncated = False
             while True:
-                block = await stream.read(65536)
+                block = await stream.read(8192)
                 if not block:
                     break
                 room = max(0, 100_000 - len(output))
                 if len(block) > room:
                     truncated = True
                 output.extend(block[:room])
+                await self.send({"type": "log", "id": request_id, "stream": stream_name,
+                                 "text": block.decode("utf-8", errors="replace")})
             return bytes(output), truncated
 
         try:
             _, (out, out_cut), (err, err_cut) = await asyncio.wait_for(
                 asyncio.gather(
                     process.wait(),
-                    bounded_read(process.stdout),
-                    bounded_read(process.stderr),
+                    bounded_read(process.stdout, "stdout"),
+                    bounded_read(process.stderr, "stderr"),
                 ), timeout=timeout
             )
         except (asyncio.TimeoutError, asyncio.CancelledError) as error:
@@ -152,7 +155,7 @@ class Agent:
                 continue
             try:
                 async with connect(self.config.server, additional_headers={"Authorization": "Bearer " + token},
-                                   max_size=8_000_000, open_timeout=10) as ws:
+                                   max_size=8_000_000, open_timeout=10, ping_interval=25, ping_timeout=30) as ws:
                     self.ws = ws
                     await ws.send(json.dumps({"type": "hello", "node_id": self.config.node_id,
                         "name": self.config.name, "workspaces": list(self.spaces), "mode": self.mode}))
