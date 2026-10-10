@@ -70,19 +70,72 @@ async def write_files(node_id: str, workspace: str, files: list[dict]) -> dict:
     return await hub.request(node_id, workspace, "write_files", {"files": files})
 
 @mcp.tool()
-async def run_shell(node_id: str, workspace: str, command: str, timeout: int = 120) -> dict:
-    """Queue a shell job in a workspace. Device approval is required in approve mode.
-    The shell uses OS user privileges; cwd is NOT a sandbox. Returns a task_id.
+async def run_shell(node_id: str, workspace: str, command: str, timeout: int = 3600,
+                    wait_seconds: float = 0) -> dict:
+    """Launch shell without blocking ChatGPT (wait_seconds=0). Optionally wait 1-20s
+    for a quick command; long-running commands return a task_id for later polling.
+    Approval is handled locally on the device. Shell cwd is NOT a sandbox.
+    timeout is the job execution limit in seconds, capped at 3600.
     """
-    return await hub.request(node_id, workspace, "shell", {"command": command, "timeout": timeout})
+    if not isinstance(command, str) or not command or len(command) > 10000:
+        raise ValueError("command must be between 1 and 10000 characters")
+    if not 1 <= timeout <= 3600:
+        raise ValueError("timeout must be between 1 and 3600 seconds")
+    return await hub.request(node_id, workspace, "shell",
+                             {"command": command, "timeout": timeout},
+                             wait_seconds=wait_seconds)
+
+@mcp.tool()
+async def run_shell_batch(node_id: str, workspace: str, commands: list[str],
+                          timeout: int = 3600) -> list[dict]:
+    """Queue multiple independent commands and receive all task IDs immediately.
+    They run concurrently on the client, subject to the host's own capacity.
+    Each shell command still requires individual local approval in Approve mode.
+    """
+    if not commands or any(not isinstance(c, str) or not c or len(c) > 10000 for c in commands):
+        raise ValueError("commands must be a non-empty array of valid shell commands")
+    if not 1 <= timeout <= 3600:
+        raise ValueError("timeout must be between 1 and 3600 seconds")
+    return await asyncio.gather(*(hub.request(node_id, workspace, "shell",
+                  {"command": cmd, "timeout": timeout}) for cmd in commands))
 
 @mcp.tool()
 async def get_task(task_id: str) -> dict:
-    """Poll a shell task for queued, approval_required, running, or terminal status."""
+    """Get a task's status and final result, without waiting for it to finish."""
     task = hub.store.get(task_id)
     if task is None:
         raise ValueError("task not found")
     return task
+
+@mcp.tool()
+async def get_tasks(task_ids: list[str]) -> list[dict]:
+    """Get up to 100 recent task statuses and results in one MCP request."""
+    return hub.store.get_many(task_ids)
+
+@mcp.tool()
+async def list_tasks(node_id: str = "", workspace: str = "", status: str = "",
+                     limit: int = 30, after_created: float = 0) -> list[dict]:
+    """List recent shell commands, newest first, including commands sent in past MCP
+    requests. Filter by node, workspace, status or creation timestamp.
+    """
+    return hub.store.list(node=node_id, workspace=workspace, status=status,
+                          limit=limit, after_created=after_created)
+
+@mcp.tool()
+async def get_task_logs(task_id: str, after_seq: int = 0, limit: int = 100) -> dict:
+    """Read incremental stdout/stderr already received from a running job.
+    Use next_seq for the next polling request; logs may be truncated on storage quota.
+    """
+    return hub.store.logs(task_id, after_seq=after_seq, limit=limit)
+
+@mcp.tool()
+async def wait_for_task(task_id: str, wait_seconds: float = 5) -> dict:
+    """Optionally wait briefly (max 20s) for an existing task, then return its
+    current state. Does not tie the MCP request to the command lifetime.
+    """
+    if not hub.store.get(task_id):
+        raise ValueError("task not found")
+    return await hub.await_task(task_id, wait_seconds)
 
 @mcp.tool()
 async def cancel_task(task_id: str) -> dict:
