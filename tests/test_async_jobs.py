@@ -138,3 +138,20 @@ def test_fifty_concurrent_queued_commands_have_distinct_ids(tmp_path):
         assert len(store.list(node="heavy", limit=100)) == 50
         assert len(store.get_many([item["task_id"] for item in jobs])) == 50
     asyncio.run(scenario())
+
+
+def test_many_task_summaries_avoid_large_mcp_payloads(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    store.create("job", "n", "repo", "shell", "echo " + "x" * 1000)
+    store.update("job", "completed", {"exit_code": 0, "stdout": "a" * 5000,
+                                     "stderr": "b" * 4000, "truncated": False})
+    summary = store.list(node="n")[0]
+    assert summary["command_truncated"] is True
+    assert len(summary["command"]) == 400
+    assert len(summary["result"]["stdout_preview"]) == 300
+    assert "stdout" not in summary["result"]
+    compact_batch = store.get_many(["job"])[0]
+    assert len(compact_batch["result"]["stderr_preview"]) == 300
+    detailed_batch = store.get_many(["job"], include_results=True)[0]
+    assert len(detailed_batch["result"]["stdout"]) == 5000
+    assert len(store.get("job")["command"]) > 400
