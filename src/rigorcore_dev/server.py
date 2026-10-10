@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from .agent import Agent
 from .config import AgentConfig, require_secret, state_dir
 from .hub import Hub
@@ -17,8 +18,23 @@ from .storage import TaskStore
 MCP_TOKEN = require_secret("RIGORCORE_MCP_TOKEN")
 AGENT_TOKEN = require_secret("RIGORCORE_AGENT_TOKEN")
 hub = Hub(AGENT_TOKEN, TaskStore(state_dir() / "jobs.sqlite3"))
-mcp = FastMCP("RigorCore Dev", stateless_http=True, json_response=True,
-              streamable_http_path="/")
+public_host = os.getenv("RIGORCORE_PUBLIC_HOST", "").strip()
+allowed_hosts = ["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "[::1]", "[::1]:*"]
+allowed_origins = ["http://localhost:*", "http://127.0.0.1:*", "http://[::1]:*"]
+if public_host:
+    if "/" in public_host or ":" in public_host:
+        raise RuntimeError("RIGORCORE_PUBLIC_HOST must be a DNS hostname, without scheme or port")
+    allowed_hosts.extend([public_host, public_host + ":*"])
+    allowed_origins.append("https://" + public_host)
+mcp = FastMCP(
+    "RigorCore Dev", stateless_http=True, json_response=True,
+    streamable_http_path="/",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    ),
+)
 
 @mcp.tool()
 async def list_nodes() -> list[dict]:
