@@ -21,6 +21,7 @@ File operations: list_files, read_file, search_text, write_files. Shell operatio
 ## Trust and security
 
 - Use two different, randomly generated bearer tokens: one MCP token and one agent token.
+- Set RIGORCORE_PUBLIC_HOST to the exact HTTPS DNS hostname when deploying behind a reverse proxy; MCP rejects hosts outside the explicit allowlist.
 - Never commit tokens. Reverse proxy must enforce HTTPS/WSS and host/origin limits.
 - Clients initiate outbound connections only; they can disconnect at any time.
 - File API workspace paths are restricted, including resolved symlink escape checks.
