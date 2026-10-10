@@ -78,10 +78,24 @@ class TaskStore:
             data["result"] = json.loads(data["result"]) if data["result"] else None
             return data
 
-    def get_many(self, task_ids: list[str]) -> list[dict]:
+    @staticmethod
+    def compact(entry: dict) -> dict:
+        """Keep list/batch MCP responses small; get_task remains the detailed endpoint."""
+        result = entry.get("result")
+        if isinstance(result, dict):
+            entry["result"] = {
+                "exit_code": result.get("exit_code"),
+                "stdout_preview": str(result.get("stdout") or "")[:300],
+                "stderr_preview": str(result.get("stderr") or "")[:300],
+                "truncated": bool(result.get("truncated")),
+            }
+        return entry
+
+    def get_many(self, task_ids: list[str], include_results: bool = False) -> list[dict]:
         if not isinstance(task_ids, list) or not 1 <= len(task_ids) <= 100:
             raise ValueError("provide 1-100 task ids")
-        return [entry for task_id in task_ids if (entry := self.get(task_id)) is not None]
+        return [entry if include_results else self.compact(entry)
+                for task_id in task_ids if (entry := self.get(task_id)) is not None]
 
     def list(self, node: str = "", workspace: str = "", status: str = "",
              limit: int = 30, after_created: float = 0.0) -> list[dict]:
@@ -102,7 +116,7 @@ class TaskStore:
             for row in rows:
                 item = dict(row)
                 item["result"] = json.loads(item["result"]) if item["result"] else None
-                result.append(item)
+                result.append(self.compact(item))
             return result
 
     def append_log(self, task_id: str, stream: str, chunk: str, max_log_bytes: int = 2_000_000) -> None:
