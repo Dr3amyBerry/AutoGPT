@@ -62,7 +62,7 @@ class Hub:
                 self.store.update(request_id, "failed", error="could not dispatch command")
                 raise ConnectionError("could not send job to agent") from exc
             result = await self.await_task(request_id, wait_seconds)
-            return {**result, "hint": ("Command finished" if result["status"] in TERMINAL else
+            return {**result, "task_id": request_id, "hint": ("Command finished" if result["status"] in TERMINAL else
                 "Command is running or awaiting local approval. Continue other work; "
                 "use get_task, list_tasks or get_task_logs later.")}
         future = asyncio.get_running_loop().create_future()
