@@ -9,7 +9,7 @@ TERMINAL = {"completed", "failed", "denied", "cancelled", "interrupted"}
 
 class TaskStore:
     def __init__(self, path: Path):
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("""CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY, node TEXT NOT NULL, workspace TEXT NOT NULL,
