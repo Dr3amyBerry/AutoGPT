@@ -23,4 +23,6 @@ def test_mcp_initialize_and_tools_list(client):
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     assert listing.status_code == 200, listing.text
     names = {tool["name"] for tool in listing.json()["result"]["tools"]}
-    assert {"list_nodes", "list_workspaces", "read_file", "write_files", "run_shell", "get_task"} <= names
+    assert {"list_nodes", "list_workspaces", "read_file", "write_files", "run_shell",
+            "run_shell_batch", "get_task", "get_tasks", "list_tasks",
+            "get_task_logs", "wait_for_task", "cancel_task"} <= names
