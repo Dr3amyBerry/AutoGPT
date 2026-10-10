@@ -116,9 +116,14 @@ class Hub:
                     task = self.store.get(request_id) if isinstance(request_id, str) else None
                     if task and task["node"] == node_id:
                         result = msg.get("result")
-                        status = "completed" if msg.get("ok") else (
-                            "denied" if msg.get("error") == "shell denied by device" else "failed"
-                        )
+                        if msg.get("ok"):
+                            status = "completed"
+                        elif msg.get("error") == "shell denied by device":
+                            status = "denied"
+                        elif msg.get("error") == "cancelled":
+                            status = "cancelled"
+                        else:
+                            status = "failed"
                         self.store.update(request_id, status, result=result, error=msg.get("error"))
                 elif kind == "status":
                     task = self.store.get(request_id) if isinstance(request_id, str) else None
