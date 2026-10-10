@@ -26,8 +26,18 @@ def start_tray(path: str):
 
     def choose(allow: bool):
         task_id = first_pending()
-        if task_id is not None:
-            submit(agent.approve(task_id, allow))
+        if task_id is None:
+            return
+        if allow:
+            # Always show the COMPLETE command before approving on Windows.
+            # MessageBox buttons: MB_YESNO | MB_ICONWARNING; IDYES = 6.
+            import ctypes
+            command = agent.pending[task_id][0]
+            decision = ctypes.windll.user32.MessageBoxW(
+                None, "Run this shell command?\\n\\n" + command,
+                "RigorCore Dev - Shell approval", 0x00000004 | 0x00000030)
+            allow = (decision == 6)
+        submit(agent.approve(task_id, allow))
 
     def set_mode(mode: str):
         submit(agent.change_mode(mode))
@@ -50,9 +60,9 @@ def start_tray(path: str):
                          None, enabled=False),
         pystray.MenuItem(lambda _: "Pending shell approvals: " + str(len(agent.pending)),
                          None, enabled=False),
-        pystray.MenuItem("Approve next command", lambda icon, item: choose(True),
+        pystray.MenuItem("Review and approve next shell command", lambda icon, item: choose(True),
                          enabled=lambda _: bool(agent.pending)),
-        pystray.MenuItem("Deny next command", lambda icon, item: choose(False),
+        pystray.MenuItem("Deny next shell command", lambda icon, item: choose(False),
                          enabled=lambda _: bool(agent.pending)),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Approve each shell command", lambda icon, item: set_mode("approve"),
