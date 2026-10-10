@@ -1,3 +1,128 @@
-# AutoGPT / RigorCore Dev
+# RigorCore Dev (AutoGPT)
 
-Private control-plane architecture for remote programming across Linux and Windows hosts. See full documentation after initial bootstrap.
+Private, self-hosted MCP control plane for programming on a Linux VPS or a Windows workstation from ChatGPT. The server manages a list of currently connected workspaces; opt-in clients make outbound connections and execute file requests and (when authorized locally) shell jobs.
+
+> **Status: early developer preview (v0.1).** This repository contains executable server and agent code and automated tests. It has not been deployed to your VPS, security audited, or connected to the ChatGPT RigorCore Dev plugin. Do not expose it publicly without HTTPS and limited system accounts.
+
+## What works
+
+- Central FastAPI server with authenticated MCP tools and authenticated WebSocket node hub.
+- List online nodes and their workspaces; read, search, list, and batch-write UTF-8 code files.
+- Queue shell commands without blocking the ChatGPT conversation, poll task output/status, cancel active jobs.
+- Store shell job results in SQLite; mark unfinished jobs interrupted after restart.
+- Linux terminal client with **Approve each shell command** / **Full Auto** and instant disconnect.
+- Windows system-tray client with the same modes, approval buttons, and disconnect.
+- Optional loopback client hosted by the central server itself.
+
+## Installation
+
+Requires Python 3.11+, Linux or Windows. For a clean install, use a virtual environment:
+
+    git clone https://github.com/Dr3amyBerry/AutoGPT.git
+    cd AutoGPT
+    python3 -m venv .venv
+    . .venv/bin/activate
+    pip install -e ".[test]"
+
+On Windows, in PowerShell:
+
+    py -3 -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    pip install -e ".[windows,test]"
+
+### 1. Start the central server (Linux VPS)
+
+Generate **different** cryptographically random tokens and keep them out of Git. For example, run this twice and store each result in a secure password manager:
+
+    python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+
+Set the environment variables in the service manager or your shell:
+
+    export RIGORCORE_MCP_TOKEN='YOUR_MCP_SECRET'
+    export RIGORCORE_AGENT_TOKEN='YOUR_DIFFERENT_AGENT_SECRET'
+    rigorcore-dev serve --host 127.0.0.1 --port 8765
+
+The server listens on loopback by default. Add a real domain, firewall and HTTPS reverse proxy. For example, with Caddy:
+
+    dev.example.com {
+        reverse_proxy 127.0.0.1:8765
+    }
+
+This exposes the MCP endpoint at https://dev.example.com/mcp/ and the agent gateway at wss://dev.example.com/agents/ws. Replace the example host with your own domain; do not copy it as a working endpoint. Both require their own bearer tokens.
+
+The FastMCP endpoint authenticates by Authorization: Bearer YOUR_MCP_SECRET. Set that in a private plugin connection that supports bearer credentials; do not place it in public plugin manifests. Connection setup and publication require supported ChatGPT configuration and user approval.
+
+### 2. Add a Linux client
+
+On each client, install the package as above and make a workspace:
+
+    mkdir -p ~/projects/demo
+    rigorcore-dev init --server wss://dev.example.com/agents/ws --node-id vps-01 --workspace demo=$HOME/projects/demo
+
+Set the agent token, then run:
+
+    export RIGORCORE_AGENT_TOKEN='YOUR_AGENT_SECRET'
+    rigorcore-dev agent
+
+Use the interactive console:
+- status / pending: view connection and approval requests.
+- allow TASK_ID / deny TASK_ID: approve or deny one shell command.
+- mode approve / mode auto: switch approval mode locally.
+- disconnect / connect: disable or restore the network connection.
+- quit: exit.
+
+For a second client, choose a different node ID and add multiple --workspace arguments. The server only lists online clients.
+
+### 3. Add a Windows client
+
+Install with the windows extras above, create agent config with a Windows absolute path, then set RIGORCORE_AGENT_TOKEN in that process environment. Run:
+
+    rigorcore-dev init --server wss://dev.example.com/agents/ws --node-id windows-pc --workspace app=C:\Users\YourUser\source\app
+    rigorcore-dev tray
+
+A small, visible icon appears in the Windows notification area. Right-click it to approve/deny queued shell jobs, switch between approval modes, disconnect/reconnect, or exit. You can launch it with pythonw.exe to avoid keeping a console window open. It does **not** install auto-start or run as a hidden service.
+
+### 4. Optionally connect the central VPS as a client
+
+The server can also register its own workspaces by starting an outbound loopback agent:
+
+    export RIGORCORE_LOCAL_WORKSPACES='{"backend":"/srv/projects/backend"}'
+    export RIGORCORE_LOCAL_AGENT_URL='ws://127.0.0.1:8765/agents/ws'
+    rigorcore-dev serve
+
+For shell approvals on the server, prefer starting an interactive CLI agent as a separate process instead of the embedded agent. An embedded agent in approve mode has no dedicated approval console.
+
+## MCP tools available
+
+| MCP tool | Purpose |
+| --- | --- |
+| list_nodes | Find connected VPS or Windows hosts |
+| list_workspaces | Show workspaces exposed by one host |
+| list_files | Enumerate files within the workspace |
+| read_file | Read one UTF-8 source file |
+| search_text | Locate code with line numbers |
+| write_files | Write up to 100 UTF-8 files as one batch, no shell approval |
+| run_shell | Queue a shell command, subject to the client's chosen approval mode |
+| get_task | Poll persistent shell task status, output, and exit code |
+| cancel_task | Ask the active client to cancel a job |
+
+Choose a node and workspace explicitly for each operation. A run_shell result is a task ID, not necessarily command completion.
+
+## Safety boundaries
+
+**Shell CWD is not a sandbox.** Even when a command starts under ~/projects/demo, the shell can navigate elsewhere and access anything the agent operating-system account can access. Running an agent as root, administrator, or with unrestricted Docker credentials is unsafe. Use a dedicated low-privilege account and container isolation if strict boundaries are needed.
+
+Use HTTPS/WSS, high-entropy independent tokens, private file permissions, restrictive firewall rules, controlled reverse-proxy origins, and a non-root service account. The current shared agent token means it is not suitable for untrusted third-party machines. Full Auto removes command-by-command approval and must be explicitly selected on the local machine.
+
+The source-file writer validates workspace paths against escaping and symlinks, with file count/size limits. It does not provide OS-level isolation.
+
+## Developer workflow
+
+    python -m compileall -q src
+    python -m pytest -q
+
+GitHub Actions runs these checks on pushes to main. See [architecture and limitations](docs/ARCHITECTURE.md).
+
+## Project status
+
+This is a functional starting implementation, not a completed remote development platform. Deployment, end-to-end WSS/MCP integration testing, hardened authentication, full shell command visibility in the Windows tray, and a production readiness/security review are still required. The ChatGPT plugin remains separate until its actual deployed MCP endpoint is configured.
