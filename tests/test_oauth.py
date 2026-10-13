@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from rigorcore_dev.oauth import MCPBearerAuth, OAuthSettings, OAuthVerifier
@@ -122,7 +122,6 @@ def _rpc(method, request_id=1, params=None):
 
 def test_public_discovery_requires_token_for_tools(tokens):
     verifier, make = tokens
-    from fastapi import Request
 
     downstream = FastAPI()
 
@@ -171,7 +170,6 @@ def test_public_discovery_requires_token_for_tools(tokens):
 
 def test_profile_uses_verified_subject_and_never_token_id(tokens):
     verifier, make = tokens
-    from fastapi import Request
 
     inner = FastAPI()
 
@@ -220,3 +218,53 @@ def test_invalid_batch_does_not_bypass_gateway(tokens):
     with TestClient(MCPBearerAuth(downstream, oauth=verifier)) as client:
         assert client.post("/", json=[_rpc("initialize"), _rpc("tools/call")]).status_code == 401
         assert client.post("/", json=_rpc("tools/list"), headers={"Authorization": "Bearer invalid"}).status_code == 200
+
+
+def test_real_fastmcp_endpoint_with_oauth_discovery(tokens):
+    """Verify the actual MCP SDK transport, not only a stub FastAPI responder."""
+    from rigorcore_dev.server import mcp, lifespan
+    verifier, make = tokens
+    api = FastAPI(lifespan=lifespan)
+    api.mount("/mcp", MCPBearerAuth(mcp.streamable_http_app(), oauth=verifier))
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+
+    with TestClient(api, base_url="http://localhost") as client:
+        init = client.post("/mcp/", headers=headers, json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "oauth-integration-test", "version": "1.0"}},
+        })
+        assert init.status_code == 200, init.text
+        assert "serverInfo" in init.json()["result"]
+
+        list_response = client.post("/mcp/", headers={**headers,
+            "MCP-Protocol-Version": "2025-06-18"},
+            json=_rpc("tools/list", 2))
+        assert list_response.status_code == 200, list_response.text
+        tools = {item["name"]: item for item in list_response.json()["result"]["tools"]}
+        assert "get_profile" in tools
+        assert "list_nodes" in tools
+        assert "write_files" in tools
+        assert all(t["securitySchemes"] ==
+                   [{"type": "oauth2", "scopes": ["rigorcore:access"]}]
+                   for t in tools.values())
+        assert tools["get_profile"]["_meta"]["openai/profile"] is True
+
+        denied = client.post("/mcp/", headers=headers, json=_rpc("tools/call", 3,
+            {"name": "list_nodes", "arguments": {}}))
+        assert denied.status_code == 200
+        assert denied.json()["result"]["isError"]
+        assert "mcp/www_authenticate" in denied.json()["result"]["_meta"]
+
+        allowed = client.post("/mcp/", headers={**headers,
+            "Authorization": "Bearer " + make()},
+            json=_rpc("tools/call", 4, {"name": "list_nodes", "arguments": {}}))
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.json()["result"]["isError"] is False
+
+        profile = client.post("/mcp/", headers={**headers,
+            "Authorization": "Bearer " + make()},
+            json=_rpc("tools/call", 5, {"name": "get_profile", "arguments": {}}))
+        assert profile.status_code == 200
+        assert profile.json()["result"]["structuredContent"]["id"].startswith("rigorcore_")

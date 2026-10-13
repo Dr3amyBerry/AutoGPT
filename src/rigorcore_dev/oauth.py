@@ -135,10 +135,17 @@ def _decorate_tool_listing(body: dict, scope: str) -> dict:
         if not isinstance(tool, dict):
             continue
         tool["securitySchemes"] = scheme
-        tool.setdefault("_meta", {})["securitySchemes"] = scheme
+        meta = tool.get("_meta") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["securitySchemes"] = scheme
+        tool["_meta"] = meta
         name = tool.get("name")
         read_only = name in READ_ONLY_TOOLS
-        annotation = tool.setdefault("annotations", {})
+        annotation = tool.get("annotations") or {}
+        if not isinstance(annotation, dict):
+            annotation = {}
+        tool["annotations"] = annotation
         annotation.update({
             "readOnlyHint": read_only,
             "destructiveHint": not read_only,
