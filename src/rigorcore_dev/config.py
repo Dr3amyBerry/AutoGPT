@@ -17,7 +17,7 @@ class AgentConfig:
 
     @classmethod
     def load(cls, filename: str) -> "AgentConfig":
-        data = json.loads(Path(filename).expanduser().read_text(encoding="utf-8"))
+        data = json.loads(Path(filename).expanduser().read_text(encoding="utf-8-sig"))
         config = cls(**data)
         if not SAFE_ID.fullmatch(config.node_id) or not config.name:
             raise ValueError("invalid node identity")

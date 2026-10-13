@@ -68,7 +68,8 @@ class Agent:
         await self.send({"type": "status", "id": request_id, "status": "running"})
         if os.name == "nt":
             argv = ["cmd", "/d", "/s", "/c", command]
-            options = {"creationflags": 0x00000200}
+            # CREATE_NEW_PROCESS_GROUP (0x200) | CREATE_NO_WINDOW (0x08000000)
+            options = {"creationflags": 0x08000200}
         else:
             argv = ["/bin/sh", "-lc", command]
             options = {"start_new_session": True}
