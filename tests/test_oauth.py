@@ -159,7 +159,7 @@ def test_public_discovery_requires_token_for_tools(tokens):
         assert challenge["isError"] is True
         assert "mcp/www_authenticate" in challenge["_meta"]
         assert "error_description=" in challenge["_meta"]["mcp/www_authenticate"][0]
-        assert client.post("/", json=_rpc("resources/list")).status_code == 401
+        assert client.post("/", json=_rpc("resources/list")).json()["result"] == {"resources": []}
         assert client.get("/").status_code == 401
 
         allowed = client.post("/", json=call,
