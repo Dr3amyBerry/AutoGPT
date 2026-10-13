@@ -54,8 +54,8 @@ class Hub:
         request_id = uuid.uuid4().hex
         message = {"type": "request", "id": request_id, "workspace": workspace,
                    "op": op, "args": args}
-        if op == "shell":
-            self.store.create(request_id, node_id, workspace, op, args.get("command", ""))
+        if op in {"shell", "build_project", "run_tests"}:
+            self.store.create(request_id, node_id, workspace, op, args.get("command", op))
             try:
                 await node.websocket.send_json(message)
             except Exception as exc:
@@ -136,7 +136,7 @@ class Hub:
                         result = msg.get("result")
                         if msg.get("ok"):
                             status = "completed"
-                        elif msg.get("error") == "shell denied by device":
+                        elif msg.get("error") in {"shell denied by device", "operation denied by device"}:
                             status = "denied"
                         elif msg.get("error") == "cancelled":
                             status = "cancelled"

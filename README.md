@@ -2,7 +2,7 @@
 
 Private, self-hosted MCP control plane for programming on a Linux VPS or a Windows workstation from ChatGPT. The server manages a list of currently connected workspaces; opt-in clients make outbound connections and execute file requests and (when authorized locally) shell jobs.
 
-> **Status: early developer preview (v0.1).** This repository contains executable server and agent code and automated tests. It has not been deployed to your VPS, security audited, or connected to the ChatGPT RigorCore Dev plugin. Do not expose it publicly without HTTPS and limited system accounts.
+> **Status:** Actively developed MCP control plane. This repository includes a real server and agent, but source code alone does not prove which version is deployed on the VPS/Windows, or that any given ChatGPT tool is live. Keep HTTPS, authentication and least-privilege accounts enabled.
 
 ## What works
 
@@ -95,6 +95,9 @@ For shell approvals on the server, prefer starting an interactive CLI agent as a
 
 ## MCP tools available
 
+The existing file and asynchronous shell tools are listed below. A second set of Windows desktop, WSA/Android, GUI automation, diagnostic and build/test operations is documented in [Desktop & Android MCP Tools](docs/DESKTOP_ANDROID.md). The new tools require updating **and restarting** the actual MCP server and Windows tray agent; updating GitHub or the ChatGPT plugin skill alone is insufficient.
+
+
 | MCP tool | Purpose |
 | --- | --- |
 | list_nodes | Find connected VPS or Windows hosts |
@@ -147,7 +150,7 @@ GitHub Actions runs these checks on pushes to main. See [architecture and limita
 
 ## Project status
 
-This is a functional starting implementation, not a completed remote development platform. Deployment, end-to-end WSS/MCP integration testing, hardened authentication, full shell command visibility in the Windows tray, and a production readiness/security review are still required. The ChatGPT plugin remains separate until its actual deployed MCP endpoint is configured.
+This is an evolving remote development platform. Validate the deployed server and agent versions and real MCP discovery independently; CI does not establish deployment. End-to-end WSS/MCP and GUI/WSA testing, hardened authentication, full operation visibility in the Windows tray, and a production readiness/security review remain necessary.
 
 
 ## OAuth 2.1 / ChatGPT login

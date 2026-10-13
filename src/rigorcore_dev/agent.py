@@ -1,6 +1,7 @@
 """Opt-in outbound agent. It makes an explicit, visible connection to one server."""
 from __future__ import annotations
 import asyncio
+import importlib
 import json
 import os
 import signal
@@ -9,6 +10,7 @@ from pathlib import Path
 from websockets.asyncio.client import connect
 from .config import AgentConfig, require_secret
 from .workspace import Workspace
+from .capabilities import CAPABILITIES
 
 class Agent:
     def __init__(self, config: AgentConfig):
@@ -28,6 +30,21 @@ class Agent:
             return False
         item[1].set_result(allowed)
         return True
+
+    async def authorize_operation(self, request_id: str, description: str):
+        """Enforce local device approval in approve mode for sensitive operations."""
+        if self.mode != "approve":
+            return
+        loop = asyncio.get_running_loop()
+        decision = loop.create_future()
+        self.pending[request_id] = (description[:4000], decision)
+        await self.send({"type": "status", "id": request_id, "status": "approval_required"})
+        print("\n[APPROVAL REQUIRED] " + request_id + "\n" + description[:4000] + "\n")
+        try:
+            if not await decision:
+                raise PermissionError("operation denied by device")
+        finally:
+            self.pending.pop(request_id, None)
 
     async def change_mode(self, mode: str):
         if mode not in {"approve", "auto"}:
@@ -60,17 +77,7 @@ class Agent:
             raise ValueError("invalid command")
         # Each job may execute for up to an hour, regardless of MCP request duration.
         timeout = min(3600, max(1, int(args.get("timeout", 3600))))
-        if self.mode == "approve":
-            loop = asyncio.get_running_loop()
-            decision = loop.create_future()
-            self.pending[request_id] = (command, decision)
-            await self.send({"type": "status", "id": request_id, "status": "approval_required"})
-            print("\n[APPROVAL REQUIRED] " + request_id + "\n" + command + "\n")
-            try:
-                if not await decision:
-                    raise PermissionError("shell denied by device")
-            finally:
-                self.pending.pop(request_id, None)
+        await self.authorize_operation(request_id, command)
         await self.send({"type": "status", "id": request_id, "status": "running"})
         if os.name == "nt":
             argv = ["cmd", "/d", "/s", "/c", command]
@@ -143,13 +150,25 @@ class Agent:
                 result = await asyncio.to_thread(ws.search, args["query"], args.get("path", "."), args.get("limit", 50))
             elif op == "write_files":
                 result = await asyncio.to_thread(ws.write, args["files"])
+            elif op in CAPABILITIES:
+                module_name, sensitive, needs_root = CAPABILITIES[op]
+                if sensitive:
+                    await self.authorize_operation(rid, op + ": " + repr(args)[:1500])
+                module = importlib.import_module("." + module_name, package=__package__)
+                function = getattr(module, "capture_screen" if op == "take_screenshot" else op)
+                if needs_root:
+                    result = await asyncio.to_thread(function, str(ws.root), **args)
+                else:
+                    result = await asyncio.to_thread(function, **args)
             else:
                 raise ValueError("unknown operation")
             await self.send({"type": "reply", "id": rid, "ok": True, "result": result})
         except asyncio.CancelledError:
             await self.send({"type": "reply", "id": rid, "ok": False, "error": "cancelled"})
         except Exception as error:
-            message = "shell denied by device" if isinstance(error, PermissionError) else str(error)[:600]
+            message = ("shell denied by device" if op == "shell" else "operation denied by device") if (
+                isinstance(error, PermissionError) and "denied by device" in str(error)
+            ) else str(error)[:600]
             await self.send({"type": "reply", "id": rid, "ok": False, "error": message})
         finally:
             self.jobs.pop(rid, None)
