@@ -175,3 +175,23 @@ the server's authentication again.
 restart the service, check both read-only probes and logs. On unexpected behavior
 revert the server to the previous tested Git commit and restart. Retain OAuth mode
 and secrets during rollback unless intentionally migrating both server and plugin.
+
+## Legacy-protocol discovery probe (October 2026)
+
+ChatGPT may first send `server/discover` (MCP revision `2026-07-28`). This
+server deliberately uses MCP Python SDK v1 (`mcp<2`) and **does not** implement
+the modern transport. The gateway therefore answers the modern probe with
+HTTP **400**, JSON-RPC `-32601`, without an OAuth challenge. Compatible clients
+can then fall back to the supported legacy `initialize` / `tools/list`
+handshake. Returning **401** to that version probe would incorrectly treat
+protocol negotiation as authentication failure.
+
+Unknown and malformed requests still fail closed. The diagnostic flag
+`RIGORCORE_MCP_TRACE_REJECTIONS=1` now records only method names or sanitized
+body categories (e.g. `json-batch[2]` or `invalid-or-null-json`) without
+recording JWTs, arguments, file contents or raw requests.
+
+This is a compatibility correction, **not** native support for MCP 2026-07-28.
+If the ChatGPT registration still fails, inspect the new rejection categories
+before changing OAuth again. Do not return fake `server/discover` capabilities
+or allow anonymous `tools/call`.

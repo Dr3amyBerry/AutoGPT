@@ -338,3 +338,65 @@ def test_opt_in_auth_logging_never_records_headers_or_parameters(tokens, caplog,
     assert "private/method" in caplog.text
     assert "leaked-SECRET" not in caplog.text
     assert "leaked-PARAM" not in caplog.text
+
+
+
+def test_modern_discover_probe_rejected_as_legacy_not_unauthorized(tokens):
+    """Auto-negotiating MCP clients must fall back, not prompt OAuth on a probe."""
+    verifier, make = tokens
+    downstream = FastAPI()
+
+    @downstream.post("/")
+    async def must_not_run(request: Request):
+        raise AssertionError("Modern discover must not reach legacy backend")
+
+    probe = {
+        "jsonrpc": "2.0",
+        "id": "discover-1",
+        "method": "server/discover",
+        "params": {"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "chatgpt-probe", "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }},
+    }
+    with TestClient(MCPBearerAuth(downstream, oauth=verifier)) as client:
+        for h in ({}, {"Authorization": "Bearer " + make()}):
+            response = client.post("/", json=probe, headers={
+                **h, "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover"
+            })
+            assert response.status_code == 400, response.text
+            assert "www-authenticate" not in response.headers
+            assert response.json()["id"] == "discover-1"
+            assert response.json()["error"]["code"] == -32601
+            assert "no-store" in response.headers.get("cache-control", "")
+
+        # Incomplete JSON-RPC discovery is still never permitted as execution.
+        assert client.post("/", json={"jsonrpc": "2.0", "method": "server/discover"}).status_code == 400
+        assert client.post("/", json={"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                                       "params": {"name": "run_shell", "arguments": {}}}).json()["result"]["isError"]
+
+
+def test_rejection_trace_distinguishes_batch_and_invalid_json_without_secrets(tokens, caplog, monkeypatch):
+    verifier, _ = tokens
+    monkeypatch.setenv("RIGORCORE_MCP_TRACE_REJECTIONS", "1")
+    inner = FastAPI()
+
+    @inner.post("/")
+    async def private(request: Request):
+        raise AssertionError("Rejected anonymous bodies must not reach the app")
+
+    with TestClient(MCPBearerAuth(inner, oauth=verifier)) as client:
+        batch = [_rpc("initialize"), _rpc("tools/call", 7,
+                 {"name": "run_shell", "arguments": {"command": "sensitive-COMMAND"}})]
+        assert client.post("/", json=batch).status_code == 401
+        assert client.post("/", json={"jsonrpc": "2.0", "id": 2,
+                                      "params": {"secret": "sensitive-PARAM"}}).status_code == 401
+        assert client.post("/", content="this-is-not-json-sensitive-BODY").status_code == 401
+
+    assert "json-batch[2]" in caplog.text
+    assert "json-object-missing-method" in caplog.text
+    assert "invalid-or-null-json" in caplog.text
+    assert "sensitive-COMMAND" not in caplog.text
+    assert "sensitive-PARAM" not in caplog.text
+    assert "sensitive-BODY" not in caplog.text

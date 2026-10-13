@@ -139,10 +139,25 @@ def _trace_denied_method(method) -> None:
     """Opt-in metadata-only debug signal; no bodies, headers or credentials."""
     if os.getenv("RIGORCORE_MCP_TRACE_REJECTIONS", "0") != "1":
         return
-    value = method if isinstance(method, str) else "(missing-or-batch)"
+    value = method if isinstance(method, str) else "(unclassified)"
     value = value[:64]
     safe = re.sub(r"[^a-zA-Z0-9_.:/-]", "_", value)
     _oauth_logger.warning("MCP unauthenticated method rejected: %s", safe)
+
+
+def _trace_request_shape(request) -> None:
+    """Distinguish batches and missing JSON methods without leaking payloads."""
+    if os.getenv("RIGORCORE_MCP_TRACE_REJECTIONS", "0") != "1":
+        return
+    if isinstance(request, list):
+        category = f"json-batch[{min(len(request), 1000)}]"
+    elif isinstance(request, dict):
+        category = "json-object-missing-method"
+    elif request is None:
+        category = "invalid-or-null-json"
+    else:
+        category = "unexpected-json-type"
+    _oauth_logger.warning("MCP unauthenticated request shape: %s", category)
 
 
 READ_ONLY_TOOLS = {
@@ -293,8 +308,26 @@ class MCPBearerAuth:
         public_discovery = method in {"initialize", "tools/list", "notifications/initialized"}
         public_discovery = public_discovery or method in PUBLIC_EMPTY_RESPONSES
 
+        # Modern MCP (2026-07-28) clients probe with server/discover first.
+        # This deployment uses MCP SDK v1, which only supports legacy
+        # initialize-based negotiation. Respond 400 (not 401), so auto-
+        # negotiating clients can select the legacy era. Do not advertise
+        # 2026 compatibility or forward this request to the legacy SDK.
+        if method == "server/discover":
+            await JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id,
+                 "error": {"code": -32601,
+                           "message": "Unsupported method for this legacy MCP server; use initialize"}},
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
+            )(scope, replay, send)
+            return
+
         if not verified and not public_discovery:
-            _trace_denied_method(method)
+            if method is None:
+                _trace_request_shape(request)
+            else:
+                _trace_denied_method(method)
             if method == "tools/call" and request_id is not None:
                 result = {
                     "jsonrpc": "2.0",
