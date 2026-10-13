@@ -222,10 +222,38 @@ def test_invalid_batch_does_not_bypass_gateway(tokens):
 
 def test_real_fastmcp_endpoint_with_oauth_discovery(tokens):
     """Verify the actual MCP SDK transport, not only a stub FastAPI responder."""
-    from rigorcore_dev.server import mcp, lifespan
+    from contextlib import asynccontextmanager
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
+
     verifier, make = tokens
+    # A separate FastMCP instance avoids starting the session-scoped test
+    # fixture's StreamableHTTPSessionManager twice (the SDK forbids reuse).
+    probe = FastMCP("OAuth probe", stateless_http=True, json_response=True,
+                    streamable_http_path="/",
+                    transport_security=TransportSecuritySettings(
+                        enable_dns_rebinding_protection=True,
+                        allowed_hosts=["localhost", "localhost:*"],
+                        allowed_origins=["http://localhost:*"],
+                    ))
+
+    @probe.tool()
+    async def list_nodes() -> list[dict]:
+        """List active nodes."""
+        return []
+
+    @probe.tool()
+    async def write_files(files: list[dict]) -> dict:
+        """Test-only mutating tool; never invoked in this test."""
+        return {"written": []}
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        async with probe.session_manager.run():
+            yield
+
     api = FastAPI(lifespan=lifespan)
-    api.mount("/mcp", MCPBearerAuth(mcp.streamable_http_app(), oauth=verifier))
+    api.mount("/mcp", MCPBearerAuth(probe.streamable_http_app(), oauth=verifier))
     headers = {"Accept": "application/json, text/event-stream",
                "Content-Type": "application/json"}
 
