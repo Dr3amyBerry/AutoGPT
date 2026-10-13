@@ -41,29 +41,64 @@ def start_tray(path: str):
 
     def change_workspace():
         def _pick():
-            import tkinter as tk
-            from tkinter import filedialog
+            import ctypes
+            import ctypes.wintypes
             import json
             from pathlib import Path
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes('-topmost', True)
-            selected = filedialog.askdirectory(
-                title="Seleccionar nueva carpeta de trabajo para RigorCore Dev"
-            )
-            root.destroy()
-            if selected:
-                selected_path = str(Path(selected).resolve())
-                new_spaces = {"demo": selected_path}
-                submit(agent.update_workspaces(new_spaces))
-                # Persist to agent.json
-                try:
-                    cfg_file = Path(path).expanduser()
-                    data = json.loads(cfg_file.read_text(encoding="utf-8-sig"))
-                    data["workspaces"] = new_spaces
-                    cfg_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
+
+            # Use native Win32 SHBrowseForFolder — safe from any thread, no tkinter needed.
+            SHBrowseForFolder = ctypes.windll.shell32.SHBrowseForFolder
+            SHGetPathFromIDListW = ctypes.windll.shell32.SHGetPathFromIDListW
+            CoTaskMemFree = ctypes.windll.ole32.CoTaskMemFree
+
+            class BROWSEINFO(ctypes.Structure):
+                _fields_ = [
+                    ("hwndOwner",      ctypes.wintypes.HWND),
+                    ("pidlRoot",       ctypes.c_void_p),
+                    ("pszDisplayName", ctypes.c_wchar_p),
+                    ("lpszTitle",      ctypes.c_wchar_p),
+                    ("ulFlags",        ctypes.c_uint),
+                    ("lpfn",           ctypes.c_void_p),
+                    ("lParam",         ctypes.c_long),
+                    ("iImage",         ctypes.c_int),
+                ]
+
+            buf = ctypes.create_unicode_buffer(260)
+            bi = BROWSEINFO()
+            bi.hwndOwner      = None
+            bi.pszDisplayName = buf
+            bi.lpszTitle      = "Seleccionar nueva carpeta de trabajo para RigorCore Dev"
+            bi.ulFlags        = 0x0001 | 0x0010 | 0x0040  # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX
+
+            pidl = SHBrowseForFolder(ctypes.byref(bi))
+            if not pidl:
+                return  # user cancelled
+
+            path_buf = ctypes.create_unicode_buffer(260)
+            SHGetPathFromIDListW(pidl, path_buf)
+            CoTaskMemFree(pidl)
+
+            selected = path_buf.value
+            if not selected:
+                return
+
+            selected_path = str(Path(selected).resolve())
+
+            # Preserve the existing workspace key name; fall back to "demo".
+            existing_key = next(iter(agent.config.workspaces), "demo")
+            new_spaces = {existing_key: selected_path}
+
+            submit(agent.update_workspaces(new_spaces))
+
+            # Persist to agent.json
+            try:
+                cfg_file = Path(path).expanduser()
+                data = json.loads(cfg_file.read_text(encoding="utf-8-sig"))
+                data["workspaces"] = new_spaces
+                cfg_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
         threading.Thread(target=_pick, daemon=True).start()
 
     def set_mode(mode: str):
