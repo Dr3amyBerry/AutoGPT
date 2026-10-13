@@ -39,6 +39,33 @@ def start_tray(path: str):
             allow = (decision == 6)
         submit(agent.approve(task_id, allow))
 
+    def change_workspace():
+        def _pick():
+            import tkinter as tk
+            from tkinter import filedialog
+            import json
+            from pathlib import Path
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            selected = filedialog.askdirectory(
+                title="Seleccionar nueva carpeta de trabajo para RigorCore Dev"
+            )
+            root.destroy()
+            if selected:
+                selected_path = str(Path(selected).resolve())
+                new_spaces = {"demo": selected_path}
+                submit(agent.update_workspaces(new_spaces))
+                # Persist to agent.json
+                try:
+                    cfg_file = Path(path).expanduser()
+                    data = json.loads(cfg_file.read_text(encoding="utf-8-sig"))
+                    data["workspaces"] = new_spaces
+                    cfg_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+        threading.Thread(target=_pick, daemon=True).start()
+
     def set_mode(mode: str):
         submit(agent.change_mode(mode))
 
@@ -49,6 +76,12 @@ def start_tray(path: str):
         submit(agent.stop())
         icon.stop()
 
+    def current_ws_info():
+        ws = agent.config.workspaces.get("demo") or next(iter(agent.config.workspaces.values()), "")
+        if len(ws) > 35:
+            ws = "..." + ws[-32:]
+        return "Workspace: " + ws
+
     image = Image.new("RGBA", (64, 64), (22, 95, 161, 255))
     pen = ImageDraw.Draw(image)
     pen.rounded_rectangle((8, 10, 56, 54), radius=9, outline="white", width=4)
@@ -58,6 +91,9 @@ def start_tray(path: str):
     menu = pystray.Menu(
         pystray.MenuItem(lambda _: "RigorCore Dev — " + ("Connected" if agent.connected else "Disconnected"),
                          None, enabled=False),
+        pystray.MenuItem(lambda _: current_ws_info(), None, enabled=False),
+        pystray.MenuItem("📁 Cambiar carpeta de trabajo...", lambda icon, item: change_workspace()),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem(lambda _: "Pending shell approvals: " + str(len(agent.pending)),
                          None, enabled=False),
         pystray.MenuItem("Review and approve next shell command", lambda icon, item: choose(True),

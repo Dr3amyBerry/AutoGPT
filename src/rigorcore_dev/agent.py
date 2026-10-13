@@ -44,6 +44,12 @@ class Agent:
             for task in list(self.jobs.values()):
                 task.cancel()
 
+    async def update_workspaces(self, workspaces: dict[str, str]):
+        self.config.workspaces = workspaces
+        self.spaces = {name: Workspace(path) for name, path in workspaces.items()}
+        if self.ws:
+            await self.ws.close()
+
     async def send(self, message: dict):
         if self.ws is not None:
             await self.ws.send(json.dumps(message))
