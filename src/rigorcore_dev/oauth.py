@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
+import re
 import json
 import os
 from collections import deque
@@ -13,6 +15,8 @@ from urllib.parse import urlsplit
 import jwt
 from jwt import PyJWKClient
 from starlette.responses import JSONResponse
+
+_oauth_logger = logging.getLogger('rigorcore_dev.oauth')
 
 
 def _https_url(value: str, name: str) -> str:
@@ -119,6 +123,27 @@ PROFILE_SCHEMA = {
     "required": ["id"],
     "additionalProperties": False,
 }
+
+# Only empty protocol metadata can be exposed without a user token.
+# Never forward these requests to FastMCP: future registered resources or
+# prompts might contain workspace-specific information.
+PUBLIC_EMPTY_RESPONSES = {
+    "ping": {},
+    "resources/list": {"resources": []},
+    "resources/templates/list": {"resourceTemplates": []},
+    "prompts/list": {"prompts": []},
+}
+
+
+def _trace_denied_method(method) -> None:
+    """Opt-in metadata-only debug signal; no bodies, headers or credentials."""
+    if os.getenv("RIGORCORE_MCP_TRACE_REJECTIONS", "0") != "1":
+        return
+    value = method if isinstance(method, str) else "(missing-or-batch)"
+    value = value[:64]
+    safe = re.sub(r"[^a-zA-Z0-9_.:/-]", "_", value)
+    _oauth_logger.warning("MCP unauthenticated method rejected: %s", safe)
+
 
 READ_ONLY_TOOLS = {
     "list_nodes", "list_workspaces", "list_files", "read_file", "search_text",
@@ -266,8 +291,10 @@ class MCPBearerAuth:
         method = request.get("method") if isinstance(request, dict) else None
         request_id = request.get("id") if isinstance(request, dict) else None
         public_discovery = method in {"initialize", "tools/list", "notifications/initialized"}
+        public_discovery = public_discovery or method in PUBLIC_EMPTY_RESPONSES
 
         if not verified and not public_discovery:
+            _trace_denied_method(method)
             if method == "tools/call" and request_id is not None:
                 result = {
                     "jsonrpc": "2.0",
@@ -281,6 +308,19 @@ class MCPBearerAuth:
                 await JSONResponse(result, headers={"Cache-Control": "no-store"})(scope, replay, send)
             else:
                 await self._unauthorized(scope, replay, send)
+            return
+
+        # Public *empty* metadata probes cannot enumerate private data, even
+        # if an MCP implementation later registers prompts/resources.
+        if method in PUBLIC_EMPTY_RESPONSES:
+            if request_id is not None:
+                await JSONResponse({
+                    "jsonrpc": "2.0", "id": request_id,
+                    "result": PUBLIC_EMPTY_RESPONSES[method],
+                }, headers={"Cache-Control": "no-store"})(scope, replay, send)
+            else:
+                await JSONResponse({"detail": "bad JSON-RPC request"}, status_code=400)(
+                    scope, replay, send)
             return
 
         if method == "tools/call" and request.get("params", {}).get("name") == "get_profile":

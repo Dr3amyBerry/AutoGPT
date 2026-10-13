@@ -296,3 +296,45 @@ def test_real_fastmcp_endpoint_with_oauth_discovery(tokens):
             json=_rpc("tools/call", 5, {"name": "get_profile", "arguments": {}}))
         assert profile.status_code == 200
         assert profile.json()["result"]["structuredContent"]["id"].startswith("rigorcore_")
+
+
+
+def test_readonly_metadata_probes_have_only_empty_results(tokens):
+    """Registration may probe capabilities beyond initialize/tools-list."""
+    from fastapi import Request
+
+    verifier, _ = tokens
+    private = FastAPI()
+
+    @private.post("/")
+    async def internal(request: Request):
+        raise AssertionError("Public probes must not reach data-bearing MCP handlers")
+
+    with TestClient(MCPBearerAuth(private, oauth=verifier)) as client:
+        for method, result in [
+            ("ping", {}),
+            ("resources/list", {"resources": []}),
+            ("resources/templates/list", {"resourceTemplates": []}),
+            ("prompts/list", {"prompts": []}),
+        ]:
+            response = client.post("/", json={
+                "jsonrpc": "2.0", "id": 9, "method": method,
+            })
+            assert response.status_code == 200, response.text
+            assert response.json()["result"] == result
+            assert "no-store" in response.headers.get("cache-control", "")
+
+
+def test_opt_in_auth_logging_never_records_headers_or_parameters(tokens, caplog, monkeypatch):
+    verifier, _ = tokens
+    private = FastAPI()
+    monkeypatch.setenv("RIGORCORE_MCP_TRACE_REJECTIONS", "1")
+    with TestClient(MCPBearerAuth(private, oauth=verifier)) as client:
+        result = client.post("/", headers={"Authorization": "Bearer leaked-SECRET"},
+                             json={"jsonrpc": "2.0", "id": 13,
+                                   "method": "private/method",
+                                   "params": {"secret": "leaked-PARAM"}})
+        assert result.status_code == 401
+    assert "private/method" in caplog.text
+    assert "leaked-SECRET" not in caplog.text
+    assert "leaked-PARAM" not in caplog.text
