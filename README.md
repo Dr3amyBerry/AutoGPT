@@ -148,3 +148,14 @@ GitHub Actions runs these checks on pushes to main. See [architecture and limita
 ## Project status
 
 This is a functional starting implementation, not a completed remote development platform. Deployment, end-to-end WSS/MCP integration testing, hardened authentication, full shell command visibility in the Windows tray, and a production readiness/security review are still required. The ChatGPT plugin remains separate until its actual deployed MCP endpoint is configured.
+
+
+## OAuth 2.1 / ChatGPT login
+
+The MCP endpoint can now verify provider-issued OAuth RS256 access tokens in
+`RIGORCORE_MCP_AUTH_MODE=oauth`, while the original static Bearer mode remains
+the default until migration. Configuration requires a real OAuth 2.1 provider,
+a verified owner account, protected-resource metadata, and a ChatGPT OAuth
+plugin configuration. See [OAuth deployment guide](docs/OAUTH.md) for the full
+setup, security implications, migration steps and rollback. The agent WebSocket
+continues using its independent agent token.

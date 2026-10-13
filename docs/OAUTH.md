@@ -1,0 +1,130 @@
+# OAuth 2.1 for ChatGPT (RigorCore Dev)
+
+## State and threat model
+
+The MCP resource server supports two **mutually exclusive** modes:
+- `bearer` (default): existing static `RIGORCORE_MCP_TOKEN` for backward compatibility.
+- `oauth`: validates **RS256 OAuth access tokens** from an established identity
+  provider, restricted to **one expected owner subject** and a required scope.
+  The legacy static MCP token is **not accepted in oauth mode**.
+
+The agent WebSocket still uses its distinct `RIGORCORE_AGENT_TOKEN` in either mode.
+The control plane allows writing source files **without local approval** and shell
+commands can escape their working directory. Any permitted OAuth token therefore
+grants powerful development-system access: use only low-privilege isolated agents
+and test workspaces; do not expose untrusted accounts. There is no per-tool scope
+segmentation yet (all tools require the same `rigorcore:access` permission).
+
+**Do not switch on OAuth until an external provider and a single owner identity
+are configured and verified. Do not disable authentication to get ChatGPT working.**
+
+## Identity provider (Auth0 or other compliant OAuth 2.1/OIDC provider)
+
+Use an existing provider rather than implementing an authorization server.
+The provider must:
+1. Expose OAuth 2.0 Authorization Server Metadata (RFC 8414) or OIDC discovery,
+   including authorization and token endpoints and `code_challenge_methods_supported: ["S256"]`.
+2. Support a client registration path ChatGPT can use: **CIMD**, DCR, or a
+   pre-registered public OAuth client. ChatGPT favors CIMD and can use the
+   token auth method `none` for PKCE-protected public clients.
+3. Issue **RS256 signed** access tokens with `iss`, `aud`, `sub`, `iat`,
+   `exp`, plus `scope: "rigorcore:access"` or `permissions:
+   ["rigorcore:access"]`. The token audience must match the configured
+   MCP resource identifier exactly.
+4. Support `resource` in authorization and token requests, targeting the MCP
+   resource identifier. If your provider does not echo/associate it with the
+   access token audience, use a provider feature/API configuration that does.
+5. Allow only the owner's account to authorize access to this private API.
+   Copy the actual **access-token `sub`** of that account into
+   `RIGORCORE_OAUTH_OWNER_SUB` (not an email or arbitrary username).
+6. Support refresh tokens or a renewal method if you need long-lived ChatGPT
+   sessions; configure `offline_access` where required.
+7. Register the **exact ChatGPT OAuth redirect URI** shown by its management
+   screen. For issuers advertising RFC 9207 issuer support correctly, the stable
+   callback can be `https://chatgpt.com/connector_platform_oauth_redirect`;
+   otherwise the callback ID may vary. Never use wildcard callbacks.
+
+See the [OpenAI authentication guide](https://developers.openai.com/plugins/build/auth)
+and [MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
+
+## VPS server settings
+
+Continue using Nginx on ports 80/443, proxy to the FastAPI service at
+`127.0.0.1:8765`. **Never** expose port 8765 to the Internet.
+Keep the existing separate agent secret, but **do not** save provider keys,
+client secrets, or passwords in GitHub.
+
+In `/etc/rigorcore-dev/server.env` (root-readable only):
+
+```ini
+RIGORCORE_MCP_AUTH_MODE=oauth
+RIGORCORE_PUBLIC_HOST=mcp.rigorcore.com
+RIGORCORE_OAUTH_ISSUER=https://YOUR-TENANT.REGION.auth0.com/
+RIGORCORE_OAUTH_AUDIENCE=https://mcp.rigorcore.com/mcp/
+RIGORCORE_OAUTH_OWNER_SUB=auth0|YOUR-EXACT-OWNER-SUBJECT
+RIGORCORE_OAUTH_SCOPE=rigorcore:access
+RIGORCORE_AGENT_TOKEN=YOUR-EXISTING-AGENT-SECRET
+# Optional if your provider's JWKS URL is not issuer + /.well-known/jwks.json:
+# RIGORCORE_OAUTH_JWKS_URL=https://YOUR-TENANT.REGION.auth0.com/.well-known/jwks.json
+```
+
+The issuer must match JWT `iss` **including the trailing slash**. The
+audience must match JWT `aud` byte-for-byte. The JWKS URL must be HTTPS on
+the issuer's origin. Startup deliberately fails with incomplete settings.
+
+A **staged migration** is recommended: first configure the provider and run
+OAuth-mode tests on a separate development instance, then switch production
+during a maintenance window. Restart and check:
+
+```sh
+sudo systemctl restart rigorcore-dev
+sudo systemctl status rigorcore-dev --no-pager
+curl -fsS https://mcp.rigorcore.com/.well-known/oauth-protected-resource
+curl -i https://mcp.rigorcore.com/mcp/
+```
+
+The metadata GET must report the configured issuer/resource/scope. An
+unauthenticated MCP request must return HTTP **401** with a
+`WWW-Authenticate: Bearer resource_metadata="..."` header. Do not expose
+tokens in curl commands, shell history, logs or ChatGPT conversations.
+
+The authorization server's `/.well-known/oauth-authorization-server` or
+`/.well-known/openid-configuration` must independently advertise PKCE S256,
+client registration, and the correct OAuth endpoints. The MCP server does
+**not** serve this metadata or perform authorization-code exchange itself.
+
+## ChatGPT plugin after provider setup
+
+Once OAuth works, change the private plugin's `mcp.json` auth declaration
+from `api_key` to:
+
+```json
+{
+  "type": "oauth",
+  "client": {"mode": "cimd"},
+  "resource": "https://mcp.rigorcore.com/mcp/",
+  "baseScopes": ["rigorcore:access"]
+}
+```
+
+Only select `cimd` if your provider supports validating OpenAI's client
+metadata document; otherwise configure `dcr` or a registered `provided`
+client as documented by the provider and OpenAI. Publishing the plugin
+manifest alone does not authenticate users, deploy the VPS or prove that
+the ChatGPT connection works. Test discovery, account authorization,
+token refresh, tools/list, read and deliberate write/command denial.
+
+## Rollback
+
+To return to the previous authentication method, set
+`RIGORCORE_MCP_AUTH_MODE=bearer`, preserve or restore
+`RIGORCORE_MCP_TOKEN`, restart the service and revert the plugin's
+OAuth declaration. The agents' authentication remains unaffected.
+
+## Security follow-ups
+
+- Per-tool OAuth scopes (`read`, `write`, `shell`).
+- Per-node agent credentials, enrollment and revocation.
+- Separate approval/authorization for `write_files`.
+- Sandboxed low-privilege shell execution.
+- Automated end-to-end ChatGPT OAuth tests with the actual identity provider.

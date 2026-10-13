@@ -2,7 +2,6 @@
 from __future__ import annotations
 import asyncio
 import contextlib
-import hmac
 import json
 import os
 from contextlib import asynccontextmanager
@@ -14,8 +13,13 @@ from .agent import Agent
 from .config import AgentConfig, require_secret, state_dir
 from .hub import Hub
 from .storage import TaskStore
+from .oauth import MCPBearerAuth, OAuthSettings, OAuthVerifier
 
-MCP_TOKEN = require_secret("RIGORCORE_MCP_TOKEN")
+AUTH_MODE = os.getenv("RIGORCORE_MCP_AUTH_MODE", "bearer").strip().lower()
+if AUTH_MODE not in {"bearer", "oauth"}:
+    raise RuntimeError("RIGORCORE_MCP_AUTH_MODE must be bearer or oauth")
+MCP_TOKEN = require_secret("RIGORCORE_MCP_TOKEN") if AUTH_MODE == "bearer" else None
+OAUTH = OAuthVerifier(OAuthSettings.from_env()) if AUTH_MODE == "oauth" else None
 AGENT_TOKEN = require_secret("RIGORCORE_AGENT_TOKEN")
 hub = Hub(AGENT_TOKEN, TaskStore(state_dir() / "jobs.sqlite3"))
 public_host = os.getenv("RIGORCORE_PUBLIC_HOST", "").strip()
@@ -144,21 +148,6 @@ async def cancel_task(task_id: str) -> dict:
     """Request cancellation of an active shell task."""
     return await hub.cancel(task_id)
 
-class BearerAuth:
-    """Authenticate the MCP surface independently of the agent connection."""
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            headers = dict(scope.get("headers", []))
-            auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
-            if not hmac.compare_digest(auth, "Bearer " + MCP_TOKEN):
-                response = JSONResponse({"detail": "unauthorized"}, status_code=401)
-                await response(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     local_task = None
@@ -187,8 +176,16 @@ app = FastAPI(title="RigorCore Dev", lifespan=lifespan)
 async def health():
     return {"status": "ok"}
 
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/mcp")
+@app.get("/.well-known/oauth-protected-resource/mcp/")
+async def oauth_resource_metadata():
+    if OAUTH is None:
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    return OAUTH.settings.protected_resource_metadata()
+
 @app.websocket("/agents/ws")
 async def agents(ws: WebSocket):
     await hub.handle(ws)
 
-app.mount("/mcp", BearerAuth(mcp.streamable_http_app()))
+app.mount("/mcp", MCPBearerAuth(mcp.streamable_http_app(), legacy_token=MCP_TOKEN, oauth=OAUTH))
