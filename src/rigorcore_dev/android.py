@@ -93,10 +93,11 @@ def android_launch(package: str, serial: str = ""):
 def android_input_text(text: str, serial: str = ""):
     if not text or len(text) > 500 or any(ord(c) < 32 or ord(c) > 126 for c in text):
         raise ValueError("only printable ASCII text up to 500 chars supported")
-    serial = _serial(serial)
+    # Validate untrusted text before even probing connected devices.
     # ADB's input text parser treats spaces as %s. Avoid shell metacharacters.
     if re.search(r"[^a-zA-Z0-9 _.,@+-]", text):
         raise ValueError("text contains characters unsupported by adb input")
+    serial = _serial(serial)
     _adb(["shell", "input", "text", text.replace(" ", "%s")], serial, timeout=15)
     return {"serial": serial, "characters": len(text)}
 
