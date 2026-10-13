@@ -1,13 +1,12 @@
-"""OAuth 2.1 resource-server validation for the private MCP control plane.
-
-Use an established OIDC/OAuth identity provider (for example Auth0).
-This module NEVER issues tokens or accepts unsigned/self-signed access tokens.
-"""
+"""ASGI OAuth gateway for MCP, including public tool discovery with protected calls."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
+import json
 import os
+from collections import deque
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -71,20 +70,15 @@ class OAuthSettings:
 
 
 class OAuthVerifier:
-    """Validate signed RS256 access tokens; fail closed on JWKS or claim errors.
-
-    Owner-subject pinning is mandatory because a successful IdP login alone does
-    not authorize arbitrary tenants/users to run shell commands on this VPS.
-    All MCP tools share one high-privilege scope in this initial private release.
-    """
+    """Only accept correctly signed Auth0 JWTs for one owner and scope."""
 
     def __init__(self, settings: OAuthSettings):
         self.settings = settings
         self.jwks_client = PyJWKClient(settings.jwks_url, cache_jwk_set=True, lifespan=300, timeout=5)
 
-    def validate(self, token: str) -> bool:
+    def validate_claims(self, token: str) -> dict | None:
         if not token or len(token) > 16384:
-            return False
+            return None
         try:
             key = self.jwks_client.get_signing_key_from_jwt(token).key
             claims = jwt.decode(
@@ -97,19 +91,96 @@ class OAuthVerifier:
                 options={"require": ["exp", "iat", "iss", "sub", "aud"]},
             )
             if not hmac.compare_digest(str(claims["sub"]), self.settings.owner_sub):
-                return False
+                return None
             raw_scopes = claims.get("scope", "")
             scopes = set(raw_scopes.split()) if isinstance(raw_scopes, str) else set()
             permissions = claims.get("permissions", [])
             if isinstance(permissions, list):
                 scopes.update(item for item in permissions if isinstance(item, str))
-            return self.settings.scope in scopes
+            return claims if self.settings.scope in scopes else None
         except (jwt.PyJWTError, ValueError, TypeError, OSError):
-            return False
+            return None
+
+    def validate(self, token: str) -> bool:
+        return self.validate_claims(token) is not None
+
+
+def _tool_schemes(scope: str) -> list[dict]:
+    return [{"type": "oauth2", "scopes": [scope]}]
+
+
+PROFILE_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+        "nickname": {"type": "string"},
+    },
+    "required": ["id"],
+    "additionalProperties": False,
+}
+
+READ_ONLY_TOOLS = {
+    "list_nodes", "list_workspaces", "list_files", "read_file", "search_text",
+    "get_task", "get_tasks", "list_tasks", "get_task_logs", "wait_for_task",
+}
+
+
+def _decorate_tool_listing(body: dict, scope: str) -> dict:
+    tools = body.get("result", {}).get("tools")
+    if not isinstance(tools, list):
+        return body
+    scheme = _tool_schemes(scope)
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool["securitySchemes"] = scheme
+        tool.setdefault("_meta", {})["securitySchemes"] = scheme
+        name = tool.get("name")
+        read_only = name in READ_ONLY_TOOLS
+        annotation = tool.setdefault("annotations", {})
+        annotation.update({
+            "readOnlyHint": read_only,
+            "destructiveHint": not read_only,
+            "openWorldHint": False,
+        })
+    tools.append({
+        "name": "get_profile",
+        "description": "Get the stable opaque identity of the account authenticated for this MCP request.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "outputSchema": PROFILE_SCHEMA,
+        "securitySchemes": scheme,
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+        "_meta": {"openai/profile": True, "securitySchemes": scheme},
+    })
+    return body
+
+
+def _challenge(settings: OAuthSettings) -> str:
+    return (
+        f'Bearer resource_metadata="{settings.resource_metadata_url}", '
+        'error="invalid_token", error_description="Authenticate with Auth0 to access RigorCore Dev"'
+    )
+
+
+def _profile_for_claims(claims: dict) -> dict:
+    # Auth0's immutable "sub" is the identity. Hashing it with the issuer
+    # avoids exposing the raw IdP user ID to the tool consumer.
+    source = (str(claims["iss"]) + "\0" + str(claims["sub"])).encode("utf-8")
+    return {"id": "rigorcore_" + hashlib.sha256(source).hexdigest()[:32],
+            "nickname": "RigorCore Dev owner"}
 
 
 class MCPBearerAuth:
-    """ASGI gate for the MCP endpoint only; the agent WebSocket uses its own key."""
+    """Fail-closed MCP ASGI gateway. Agent WebSocket uses separate authentication.
+
+    In OAuth mode only initialize, tools/list and initialized notifications are
+    anonymously discoverable. Tool calls and all other methods require a verified
+    JWT. An unauthenticated tools/call returns the OpenAI MCP OAuth challenge.
+    This discovery layer is needed for ChatGPT's mixed OAuth linking flow.
+    """
+
+    MAX_PROBE_BYTES = 65536
 
     def __init__(self, app, *, legacy_token: str | None = None,
                  oauth: OAuthVerifier | None = None):
@@ -120,25 +191,143 @@ class MCPBearerAuth:
         self.oauth = oauth
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            headers = dict(scope.get("headers", []))
-            authorization = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
-            ok = False
-            if authorization.startswith("Bearer "):
-                token = authorization[7:]
-                if self.oauth:
-                    ok = await asyncio.to_thread(self.oauth.validate, token)
-                else:
-                    ok = hmac.compare_digest(token, self.legacy_token)
-            if not ok:
-                response_headers = {}
-                if self.oauth:
-                    settings = self.oauth.settings
-                    response_headers["WWW-Authenticate"] = (
-                        f'Bearer resource_metadata="{settings.resource_metadata_url}", '
-                        f'scope="{settings.scope}", error="invalid_token"'
-                    )
-                response = JSONResponse({"detail": "unauthorized"}, status_code=401, headers=response_headers)
-                await response(scope, receive, send)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        authorization = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+        token = authorization[7:] if authorization.startswith("Bearer ") else ""
+        if self.oauth is None:
+            if not hmac.compare_digest(token, self.legacy_token):
+                await JSONResponse({"detail": "unauthorized"}, status_code=401)(scope, receive, send)
                 return
-        await self.app(scope, receive, send)
+            await self.app(scope, receive, send)
+            return
+
+        claims = await asyncio.to_thread(self.oauth.validate_claims, token) if token else None
+        verified = claims is not None
+
+        # GET /mcp/ stays protected, including WebSocket/streaming handshakes.
+        if scope.get("method") != "POST":
+            if not verified:
+                await self._unauthorized(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+
+        # Large authorized tool writes are forwarded without buffering.
+        raw_length = headers.get(b"content-length", b"")
+        try:
+            length = int(raw_length) if raw_length else 0
+        except ValueError:
+            length = self.MAX_PROBE_BYTES + 1
+        if length > self.MAX_PROBE_BYTES:
+            if not verified:
+                await self._unauthorized(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+
+        pending = deque()
+        total = 0
+        while True:
+            message = await receive()
+            pending.append(message)
+            if message["type"] != "http.request":
+                break
+            total += len(message.get("body", b""))
+            if total > self.MAX_PROBE_BYTES or not message.get("more_body", False):
+                break
+
+        async def replay():
+            if pending:
+                return pending.popleft()
+            return await receive()
+
+        if total > self.MAX_PROBE_BYTES:
+            if not verified:
+                await self._unauthorized(scope, replay, send)
+                return
+            await self.app(scope, replay, send)
+            return
+
+        try:
+            request = json.loads(b"".join(m.get("body", b"") for m in pending))
+        except (ValueError, TypeError):
+            request = None
+        method = request.get("method") if isinstance(request, dict) else None
+        request_id = request.get("id") if isinstance(request, dict) else None
+        public_discovery = method in {"initialize", "tools/list", "notifications/initialized"}
+
+        if not verified and not public_discovery:
+            if method == "tools/call" and request_id is not None:
+                result = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "content": [{"type": "text", "text": "Sign in to RigorCore Dev before using tools."}],
+                        "isError": True,
+                        "_meta": {"mcp/www_authenticate": [_challenge(self.oauth.settings)]},
+                    },
+                }
+                await JSONResponse(result, headers={"Cache-Control": "no-store"})(scope, replay, send)
+            else:
+                await self._unauthorized(scope, replay, send)
+            return
+
+        if method == "tools/call" and request.get("params", {}).get("name") == "get_profile":
+            arguments = request.get("params", {}).get("arguments", {})
+            if arguments not in ({}, None):
+                await JSONResponse({"jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32602, "message": "get_profile requires no arguments"}})(scope, replay, send)
+                return
+            profile = _profile_for_claims(claims)
+            await JSONResponse({
+                "jsonrpc": "2.0", "id": request_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(profile)}],
+                    "structuredContent": profile,
+                    "isError": False,
+                },
+            }, headers={"Cache-Control": "no-store"})(scope, replay, send)
+            return
+
+        if method != "tools/list":
+            await self.app(scope, replay, send)
+            return
+
+        # FastMCP (json_response=True) emits tools/list as one JSON response.
+        # Rebuild that response to attach auth metadata to each tool. No private
+        # workspace data is returned by discovery.
+        messages = []
+
+        async def stamp(message):
+            messages.append(message)
+            if message["type"] != "http.response.body" or message.get("more_body", False):
+                return
+            started = next((m for m in messages if m["type"] == "http.response.start"), None)
+            original = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
+            if started is not None and started.get("status") == 200:
+                try:
+                    document = json.loads(original)
+                    if isinstance(document, dict):
+                        document = _decorate_tool_listing(document, self.oauth.settings.scope)
+                        original = json.dumps(document, separators=(",", ":")).encode("utf-8")
+                        started["headers"] = [
+                            (k, v) for k, v in started.get("headers", [])
+                            if k.lower() != b"content-length"
+                        ] + [(b"content-length", str(len(original)).encode())]
+                except (ValueError, TypeError):
+                    pass
+            if started is not None:
+                await send(started)
+            await send({"type": "http.response.body", "body": original, "more_body": False})
+
+        await self.app(scope, replay, stamp)
+
+    async def _unauthorized(self, scope, receive, send):
+        await JSONResponse(
+            {"detail": "unauthorized"}, status_code=401,
+            headers={"WWW-Authenticate": _challenge(self.oauth.settings), "Cache-Control": "no-store"}
+        )(scope, receive, send)

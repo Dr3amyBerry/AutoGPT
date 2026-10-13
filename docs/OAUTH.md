@@ -128,3 +128,50 @@ OAuth declaration. The agents' authentication remains unaffected.
 - Separate approval/authorization for `write_files`.
 - Sandboxed low-privilege shell execution.
 - Automated end-to-end ChatGPT OAuth tests with the actual identity provider.
+
+
+## ChatGPT account linking and public tool discovery (October 2026)
+
+The plugin now uses **mixed OAuth** discovery: \`initialize\` and \`tools/list\`
+can run without credentials so ChatGPT discovers the OAuth2 security requirements
+and the profile tool. **Every tools/call and all private operations still require**
+an RS256-signed access token for the pinned owner and \`rigorcore:access\` scope.
+
+An unauthenticated \`tools/call\` responds with the MCP
+\`_meta["mcp/www_authenticate"]\` challenge to prompt ChatGPT's OAuth login.
+An unauthenticated GET /mcp/ still returns HTTP 401 with the matching
+WWW-Authenticate header. Missing or invalid tokens can never invoke any device
+tool. The only public information is tool names, input schemas, and descriptions.
+
+The optional \`get_profile\` tool is read-only and returns a stable opaque ID
+derived from the **validated token's** issuer and subject; it does not expose
+user emails or secrets. It includes \`_meta["openai/profile"]\` and output schema.
+Both per-tool \`securitySchemes\` and the backward-compatible
+\`_meta.securitySchemes\` mirror are returned on \`tools/list\`.
+
+The plugin manifest at \`mcp.json\` must use \`"type": "mixed"\` with the existing
+CIMD client declaration, scope and resource, not \`"type": "none"\`. This is
+*not* anonymous API access: OAuth remains mandatory for every tool call.
+
+After deploying, use these safe, token-free checks:
+
+\`\`\`bash
+curl -fsS https://mcp.rigorcore.com/.well-known/oauth-protected-resource
+curl -i https://mcp.rigorcore.com/mcp/
+curl -fsS -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' -X POST \\
+  https://mcp.rigorcore.com/mcp/ \\
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0"}}}'
+\`\`\`
+
+The last POST should return JSON-RPC initialization, not 401.
+List tools next with method \`tools/list\` and verify the presence of
+\`securitySchemes\` and \`get_profile\`; do not call write or shell tools merely
+to test OAuth. The only login that can grant access is the pinned Auth0 owner.
+If the ChatGPT connection UI still does not appear, inspect CIMD compatibility
+and the provider's OAuth metadata with an MCP Inspector client before changing
+the server's authentication again.
+
+**Rollout:** Pull the tested commit on the VPS, reinstall \`pip install -e .\`,
+restart the service, check both read-only probes and logs. On unexpected behavior
+revert the server to the previous tested Git commit and restart. Retain OAuth mode
+and secrets during rollback unless intentionally migrating both server and plugin.
