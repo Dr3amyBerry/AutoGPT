@@ -46,37 +46,52 @@ def start_tray(path: str):
             import json
             from pathlib import Path
 
-            # Use native Win32 SHBrowseForFolder — safe from any thread, no tkinter needed.
-            SHBrowseForFolder = ctypes.windll.shell32.SHBrowseForFolder
-            SHGetPathFromIDListW = ctypes.windll.shell32.SHGetPathFromIDListW
-            CoTaskMemFree = ctypes.windll.ole32.CoTaskMemFree
+            # The modern shell picker needs STA COM on this worker thread.
+            ole32 = ctypes.windll.ole32
+            shell32 = ctypes.windll.shell32
+            ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            ole32.CoInitializeEx.restype = ctypes.c_long
+            ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+            ole32.CoTaskMemFree.restype = None
+            ole32.CoUninitialize.argtypes = []
+            ole32.CoUninitialize.restype = None
 
             class BROWSEINFO(ctypes.Structure):
                 _fields_ = [
-                    ("hwndOwner",      ctypes.wintypes.HWND),
-                    ("pidlRoot",       ctypes.c_void_p),
+                    ("hwndOwner", ctypes.wintypes.HWND),
+                    ("pidlRoot", ctypes.c_void_p),
                     ("pszDisplayName", ctypes.c_wchar_p),
-                    ("lpszTitle",      ctypes.c_wchar_p),
-                    ("ulFlags",        ctypes.c_uint),
-                    ("lpfn",           ctypes.c_void_p),
-                    ("lParam",         ctypes.c_long),
-                    ("iImage",         ctypes.c_int),
+                    ("lpszTitle", ctypes.c_wchar_p),
+                    ("ulFlags", ctypes.c_uint),
+                    ("lpfn", ctypes.c_void_p),
+                    ("lParam", ctypes.c_ssize_t),
+                    ("iImage", ctypes.c_int),
                 ]
 
-            buf = ctypes.create_unicode_buffer(260)
-            bi = BROWSEINFO()
-            bi.hwndOwner      = None
-            bi.pszDisplayName = buf
-            bi.lpszTitle      = "Seleccionar nueva carpeta de trabajo para RigorCore Dev"
-            bi.ulFlags        = 0x0001 | 0x0010 | 0x0040  # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX
-
-            pidl = SHBrowseForFolder(ctypes.byref(bi))
-            if not pidl:
-                return  # user cancelled
-
+            browse = shell32.SHBrowseForFolderW
+            browse.argtypes = [ctypes.POINTER(BROWSEINFO)]
+            browse.restype = ctypes.c_void_p
+            get_path = shell32.SHGetPathFromIDListW
+            get_path.argtypes = [ctypes.c_void_p, ctypes.wintypes.LPWSTR]
+            get_path.restype = ctypes.wintypes.BOOL
+            result = ole32.CoInitializeEx(None, 2)  # COINIT_APARTMENTTHREADED
+            if result < 0:
+                raise OSError(f"Cannot initialize folder picker COM: {result:#x}")
             path_buf = ctypes.create_unicode_buffer(260)
-            SHGetPathFromIDListW(pidl, path_buf)
-            CoTaskMemFree(pidl)
+            pidl = None
+            try:
+                display = ctypes.create_unicode_buffer(260)
+                bi = BROWSEINFO()
+                bi.pszDisplayName = ctypes.cast(display, ctypes.c_wchar_p)
+                bi.lpszTitle = "Seleccionar nueva carpeta de trabajo para RigorCore Dev"
+                bi.ulFlags = 0x0001 | 0x0010 | 0x0040
+                pidl = browse(ctypes.byref(bi))
+                if not pidl or not get_path(pidl, path_buf):
+                    return
+            finally:
+                if pidl:
+                    ole32.CoTaskMemFree(pidl)
+                ole32.CoUninitialize()
 
             selected = path_buf.value
             if not selected:
